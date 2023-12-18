@@ -1,6 +1,7 @@
 use serde::Serialize;
 use sqlx::{query_as, MySqlPool};
 use std::collections::BTreeMap;
+use tracing::instrument;
 
 /// A mapping of users to their permissions via groups
 #[derive(Debug, Default, PartialEq, Eq, Hash, Serialize)]
@@ -8,6 +9,7 @@ pub struct Permissions(BTreeMap<String, Vec<String>>);
 
 impl Permissions {
     /// Fetches [`Permissions`] from ISPyB
+    #[instrument(name = "fetch_permissions")]
     pub async fn fetch(ispyb_pool: &MySqlPool) -> Result<Self, sqlx::Error> {
         let permisions_rows = query_as!(
             PermissionRow,

@@ -27,6 +27,7 @@ use require_bearer::RequireBearerLayer;
 use serde::Serialize;
 use sqlx::{mysql::MySqlPoolOptions, MySqlPool};
 use std::{
+    fmt::Debug,
     hash::Hash,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     ops::Add,
@@ -40,6 +41,7 @@ use tokio::{
     time::{sleep_until, Instant},
 };
 use tower_http::trace::TraceLayer;
+use tracing::instrument;
 use tracing_subscriber::util::SubscriberInitExt;
 use url::Url;
 
@@ -56,7 +58,7 @@ where
 
 impl<Metadata> TryFrom<Bundle<Metadata>> for BundleFile<Metadata>
 where
-    Metadata: Hash + Serialize,
+    Metadata: Debug + Hash + Serialize,
 {
     type Error = anyhow::Error;
 
@@ -102,13 +104,8 @@ async fn main() {
         .finish()
         .init();
 
-    let ispyb_pool = MySqlPoolOptions::new()
-        .connect(args.database_url.as_str())
-        .await
-        .unwrap();
-    let current_bundle = Arc::new(RwLock::new(
-        BundleFile::try_from(Bundle::fetch(NoMetadata, &ispyb_pool).await.unwrap()).unwrap(),
-    ));
+    let ispyb_pool = connect_ispyb(args.database_url).await.unwrap();
+    let current_bundle = fetch_initial_bundle(&ispyb_pool).await.unwrap();
     let app = Router::new()
         .route("/bundle.tar.gz", get(bundle_endpoint))
         .route_layer(RequireBearerLayer::new(args.require_token))
@@ -126,6 +123,22 @@ async fn main() {
     tasks.join_next().await.unwrap().unwrap()
 }
 
+/// Creates a connection pool to the ISPyB instance at the provided [`Url`]
+#[instrument]
+async fn connect_ispyb(database_url: Url) -> Result<MySqlPool, sqlx::Error> {
+    MySqlPoolOptions::new().connect(database_url.as_str()).await
+}
+
+/// Fetches the intial [`Bundle`] from ISPyB and produces the correspoinding [`BundleFile`]
+#[instrument]
+async fn fetch_initial_bundle(
+    ispyb_pool: &MySqlPool,
+) -> Result<Arc<RwLock<BundleFile<NoMetadata>>>, anyhow::Error> {
+    Ok(Arc::new(RwLock::new(BundleFile::try_from(
+        Bundle::fetch(NoMetadata, ispyb_pool).await.unwrap(),
+    )?)))
+}
+
 /// Bind to the provided socket address and serve the application endpoints
 async fn serve_app(port: u16, app: Router) {
     let socket_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
@@ -134,6 +147,7 @@ async fn serve_app(port: u16, app: Router) {
 }
 
 /// Periodically update the bundle with new data from ISPyB
+#[instrument(skip(current_bundle))]
 async fn update_bundle(
     current_bundle: impl AsRef<RwLock<BundleFile<NoMetadata>>>,
     ispyb_pool: MySqlPool,

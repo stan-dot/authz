@@ -1,6 +1,7 @@
 use serde::Serialize;
 use sqlx::{query_as, MySqlPool};
 use std::collections::BTreeMap;
+use tracing::instrument;
 
 /// A mapping of users to their proposals
 #[derive(Debug, Default, PartialEq, Eq, Hash, Serialize)]
@@ -8,6 +9,7 @@ pub struct Proposals(BTreeMap<String, Vec<u32>>);
 
 impl Proposals {
     /// Fetches [`Proposals`] from ISPyB
+    #[instrument(name = "fetch_proposals")]
     pub async fn fetch(ispyb_pool: &MySqlPool) -> Result<Self, sqlx::Error> {
         let proposal_rows = query_as!(
             ProposalRow,
