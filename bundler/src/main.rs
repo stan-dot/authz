@@ -133,23 +133,25 @@ fn setup_telemetry(
         tracing_subscriber::filter::LevelFilter::from_level(log_level),
     );
     if let Some(tracing_url) = tracing_url {
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(
-                opentelemetry_otlp::new_exporter()
-                    .tonic()
-                    .with_endpoint(tracing_url),
-            )
-            .with_trace_config(opentelemetry_sdk::trace::config().with_resource(
-                opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
-                    "service.name",
-                    "bundler",
-                )]),
-            ))
-            .install_batch(opentelemetry_sdk::runtime::Tokio)?;
+        let tracer_layer = tracing_opentelemetry::layer().with_tracer(
+            opentelemetry_otlp::new_pipeline()
+                .tracing()
+                .with_exporter(
+                    opentelemetry_otlp::new_exporter()
+                        .tonic()
+                        .with_endpoint(tracing_url),
+                )
+                .with_trace_config(opentelemetry_sdk::trace::config().with_resource(
+                    opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
+                        "service.name",
+                        "bundler",
+                    )]),
+                ))
+                .install_batch(opentelemetry_sdk::runtime::Tokio)?,
+        );
         tracing_subscriber::Registry::default()
             .with(log_layer)
-            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .with(tracer_layer)
             .init();
     } else {
         tracing_subscriber::Registry::default()
