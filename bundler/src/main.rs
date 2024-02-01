@@ -18,10 +18,11 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::get,
-    serve, Router,
+    Router,
 };
 use axum_extra::TypedHeader;
 use clap::Parser;
+use clio::ClioPath;
 use headers::{ETag, HeaderMapExt, IfNoneMatch};
 use opentelemetry_otlp::WithExportConfig;
 use require_bearer::RequireBearerLayer;
@@ -29,7 +30,9 @@ use serde::Serialize;
 use sqlx::{mysql::MySqlPoolOptions, MySqlPool};
 use std::{
     fmt::Debug,
+    fs::File,
     hash::Hash,
+    io::Write,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     ops::Add,
     str::FromStr,
@@ -73,11 +76,20 @@ where
 
 /// A thread safe, mutable, wrapper around the [`BundleFile`]
 type CurrentBundle = Arc<RwLock<BundleFile<NoMetadata>>>;
-
 /// Bundler acts as a Open Policy Agent bundle server, providing permissionable data from the ISPyB database
+
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about= None)]
-struct Cli {
+enum Cli {
+    /// Run the service providing bundle data
+    Serve(ServeArgs),
+    /// Output the bundle schema
+    BundleSchema(BundleSchemaArgs),
+}
+
+/// Arguments to run the service with
+#[derive(Debug, Parser)]
+struct ServeArgs {
     /// The port to which this application should bind
     #[arg(short, long, env = "BUNDLER_PORT", default_value_t = 80)]
     port: u16,
@@ -98,11 +110,27 @@ struct Cli {
     otel_collector_url: Option<Url>,
 }
 
+/// Arguments to output the schema with
+#[derive(Debug, Parser)]
+struct BundleSchemaArgs {
+    /// The path to write the schema to
+    #[arg(short, long, value_parser = clap::value_parser!(ClioPath).exists().is_dir())]
+    path: Option<ClioPath>,
+}
+
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
     let args = Cli::parse();
 
+    match args {
+        Cli::Serve(args) => serve(args).await,
+        Cli::BundleSchema(args) => bundle_schema(args),
+    }
+}
+
+/// Runs the service, pulling fresh bundles from ISPyB and serving them via the API
+async fn serve(args: ServeArgs) {
     setup_telemetry(args.log_level, args.otel_collector_url).unwrap();
 
     let ispyb_pool = connect_ispyb(args.database_url).await.unwrap();
@@ -125,7 +153,7 @@ async fn main() {
         ispyb_pool,
         args.polling_interval.into(),
     ));
-    tasks.spawn(serve_app(args.port, app));
+    tasks.spawn(serve_endpoints(args.port, app));
     tasks.join_next().await.unwrap().unwrap()
 }
 
@@ -207,10 +235,10 @@ async fn fetch_initial_bundle(
 }
 
 /// Bind to the provided socket address and serve the application endpoints
-async fn serve_app(port: u16, app: Router) {
+async fn serve_endpoints(port: u16, app: Router) {
     let socket_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
     let listener = TcpListener::bind(socket_addr).await.unwrap();
-    serve(listener, app).await.unwrap()
+    axum::serve(listener, app).await.unwrap()
 }
 
 /// Periodically update the bundle with new data from ISPyB
@@ -260,4 +288,26 @@ async fn bundle_endpoint(
 /// Returns a HTTP 404 status code when a non-existant route is queried
 async fn fallback_endpoint() -> impl IntoResponse {
     StatusCode::NOT_FOUND
+}
+
+/// Outputs the bundle schema as a set of files or to standard output
+fn bundle_schema(args: BundleSchemaArgs) {
+    let schemas = Bundle::<NoMetadata>::schemas()
+        .into_iter()
+        .map(|(name, schema)| (name, serde_json::to_string_pretty(&schema).unwrap()));
+    if let Some(path) = args.path {
+        for (name, schema) in schemas {
+            let mut schema_file =
+                File::create(path.clone().join(name).with_extension("json")).unwrap();
+            schema_file.write_all(schema.as_bytes()).unwrap();
+        }
+    } else {
+        println!(
+            "{}",
+            schemas
+                .map(|(_, schema)| schema)
+                .collect::<Vec<_>>()
+                .join("\n\n---\n\n")
+        )
+    }
 }

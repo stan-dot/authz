@@ -41,7 +41,7 @@ services:
     ports:
       - 55679:55679
     volumes:
-      - ./collector.yml:/etc/otelcol/config.yaml,z
+      - ./collector.yml:/etc/otelcol/config.yaml
 
   jaeger:
     image: docker.io/jaegertracing/all-in-one:1.52.0

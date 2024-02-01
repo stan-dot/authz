@@ -14,25 +14,40 @@ receivers:
             - targets:
                 - opa:8181
 
+processors:
+  batch:
+
 exporters:
   otlp/jaeger:
     endpoint: jaeger:4317
     tls:
       insecure: true
   prometheus:
-    endpoint: localhost:8889
+    endpoint: :8889
     namespace: default
 
 service:
+  extensions:
+    - health_check
+    - zpages
   pipelines:
     traces:
       receivers:
         - otlp
+      processors:
+        - batch
       exporters:
         - otlp/jaeger
     metrics:
       receivers:
         - otlp
         - prometheus
+      processors:
+        - batch
       exporters:
         - prometheus
+
+extensions:
+  health_check:
+  zpages:
+    endpoint: :55679
