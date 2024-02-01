@@ -3,6 +3,8 @@
 An Open Policy Agent (OPA) Bundle Server, supplying permissionable data from the Diamond Light Source ISPyB database
 
 
+# Rust code explanation
+
 ## Information flow and division of responsibility between files.
 
 The *main* responsibilities are handled in `main.rs`, that is:
