@@ -44,7 +44,13 @@ use tokio::{
     sync::RwLock,
     time::{sleep_until, Instant},
 };
+<<<<<<< HEAD
 use tower_http::trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer};
+=======
+use tower_http::trace::{
+    DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer,
+};
+>>>>>>> 724da12c01ee4a6005a0acadc1e77da67a7bd07d
 use tracing::instrument;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
@@ -137,15 +143,25 @@ async fn serve(args: ServeArgs) {
     let current_bundle = fetch_initial_bundle(&ispyb_pool).await.unwrap();
     let app = Router::new()
         .route("/bundle.tar.gz", get(bundle_endpoint))
+        .with_state(current_bundle.clone())
         .route_layer(RequireBearerLayer::new(args.require_token))
+        .route("/healthz", get(health_endpoint))
         .fallback(fallback_endpoint)
         .layer(
             TraceLayer::new_for_http()
+<<<<<<< HEAD
                 .on_request(DefaultOnRequest::default().level(tracing::Level::INFO))
                 .on_response(DefaultOnResponse::new().level(tracing::Level::INFO))
                 .on_failure(DefaultOnFailure::new().level(tracing::Level::INFO)),
         )
         .with_state(current_bundle.clone());
+=======
+                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
+                .on_request(DefaultOnRequest::default().level(tracing::Level::INFO))
+                .on_response(DefaultOnResponse::new().level(tracing::Level::INFO))
+                .on_failure(DefaultOnFailure::new().level(tracing::Level::INFO)),
+        );
+>>>>>>> 724da12c01ee4a6005a0acadc1e77da67a7bd07d
 
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(update_bundle(
@@ -221,7 +237,14 @@ fn setup_telemetry(
 /// Creates a connection pool to the ISPyB instance at the provided [`Url`]
 #[instrument]
 async fn connect_ispyb(database_url: Url) -> Result<MySqlPool, sqlx::Error> {
+<<<<<<< HEAD
     MySqlPoolOptions::new().connect(database_url.as_str()).await
+=======
+    tracing::info!("Establishing connection with ISPyB");
+    let connection = MySqlPoolOptions::new().connect(database_url.as_str()).await;
+    tracing::info!("Connection established wiht ISPyB");
+    connection
+>>>>>>> 724da12c01ee4a6005a0acadc1e77da67a7bd07d
 }
 
 /// Fetches the intial [`Bundle`] from ISPyB and produces the correspoinding [`BundleFile`]
@@ -229,15 +252,28 @@ async fn connect_ispyb(database_url: Url) -> Result<MySqlPool, sqlx::Error> {
 async fn fetch_initial_bundle(
     ispyb_pool: &MySqlPool,
 ) -> Result<Arc<RwLock<BundleFile<NoMetadata>>>, anyhow::Error> {
+<<<<<<< HEAD
     Ok(Arc::new(RwLock::new(BundleFile::try_from(
         Bundle::fetch(NoMetadata, ispyb_pool).await.unwrap(),
     )?)))
+=======
+    tracing::info!("Fetching initial bundle");
+    let bundle = Arc::new(RwLock::new(BundleFile::try_from(
+        Bundle::fetch(NoMetadata, ispyb_pool).await.unwrap(),
+    )?));
+    tracing::info!(
+        "Using bundle with revison: {}",
+        bundle.as_ref().read().await.bundle.revision()
+    );
+    Ok(bundle)
+>>>>>>> 724da12c01ee4a6005a0acadc1e77da67a7bd07d
 }
 
 /// Bind to the provided socket address and serve the application endpoints
 async fn serve_endpoints(port: u16, app: Router) {
     let socket_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
     let listener = TcpListener::bind(socket_addr).await.unwrap();
+    tracing::info!("Serving HTTP API on {}", socket_addr);
     axum::serve(listener, app).await.unwrap()
 }
 
@@ -252,9 +288,22 @@ async fn update_bundle(
     loop {
         sleep_until(next_fetch).await;
         next_fetch = next_fetch.add(polling_interval);
+        tracing::info!("Updating bundle");
         let bundle = Bundle::fetch(NoMetadata, &ispyb_pool).await.unwrap();
         let bundle_file = BundleFile::try_from(bundle).unwrap();
+        let old_revision = current_bundle
+            .as_ref()
+            .read()
+            .await
+            .bundle
+            .revision()
+            .to_owned();
         *current_bundle.as_ref().write().await = bundle_file;
+        tracing::info!(
+            "Updated bundle from {} to {}",
+            old_revision,
+            current_bundle.as_ref().read().await.bundle.revision()
+        );
     }
 }
 
@@ -273,6 +322,11 @@ async fn bundle_endpoint(
     .unwrap();
     let mut headers = HeaderMap::new();
     headers.typed_insert(etag.clone());
+    tracing::info!(
+        "Request had If-None-Match of {:?}, current ETag is {:?}",
+        if_none_match,
+        etag
+    );
     match if_none_match {
         Some(TypedHeader(if_none_match)) if !if_none_match.precondition_passes(&etag) => {
             (StatusCode::NOT_MODIFIED, headers, Bytes::new())
@@ -283,6 +337,13 @@ async fn bundle_endpoint(
             current_bundle.as_ref().read().await.file.clone(),
         ),
     }
+}
+
+/// Returns an HTTP 200 response when requested.
+///
+/// Failures in the bundle update and serialization result in service crash, so ability to serve this endpoint implies liveness
+async fn health_endpoint() -> impl IntoResponse {
+    StatusCode::OK
 }
 
 /// Returns a HTTP 404 status code when a non-existant route is queried

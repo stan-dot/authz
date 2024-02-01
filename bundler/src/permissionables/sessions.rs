@@ -1,12 +1,13 @@
+use derive_more::{Deref, DerefMut};
 use schemars::JsonSchema;
 use serde::Serialize;
 use sqlx::{query_as, MySqlPool};
 use std::collections::BTreeMap;
 use tracing::instrument;
 
-/// A mapping of users to their sessions, possibly via proposals
-#[derive(Debug, Default, PartialEq, Eq, Hash, Serialize, JsonSchema)]
-pub struct Sessions(BTreeMap<String, Vec<(u32, u32)>>);
+/// A mapping of sessions to their various attributes
+#[derive(Debug, Default, Deref, DerefMut, PartialEq, Eq, Hash, Serialize, JsonSchema)]
+pub struct Sessions(BTreeMap<u32, Session>);
 
 impl Sessions {
     /// Fetches [`Sessions`] from ISPyB
@@ -16,33 +17,13 @@ impl Sessions {
             RawSessionRow,
             "
             SELECT
-                login as fed_id,
-                proposalNumber AS proposal_number,
-                visit_number
+                sessionId as session_id,
+                proposalNumber as proposal_number,
+                visit_number,
+                beamLineName as beamline
             FROM
-                Session_has_Person
-                INNER JOIN BLSession USING (sessionId)
-                INNER JOIN Person USING (personId)
-                INNER JOIN Proposal USING (proposalId)
-            WHERE
-                Proposal.externalId IS NOT NULL
-            UNION
-            SELECT
-                login as fed_id,
-                proposalNumber AS proposal_number,
-                visit_number
-            FROM (
-                    SELECT
-                        DISTINCT proposalId,
-                        personId
-                    FROM
-                        ProposalHasPerson
-                ) AS UniqueProposalHasPerson
-                CROSS JOIN BLSession USING (proposalId)
-                INNER JOIN Person USING (personId)
-                INNER JOIN Proposal USING (proposalId)
-            WHERE
-                Proposal.externalId IS NOT NULL
+                BLSession
+                JOIN Proposal USING (proposalId)
             "
         )
         .fetch_all(ispyb_pool)
@@ -52,21 +33,35 @@ impl Sessions {
     }
 }
 
-/// A row from ISPyB detailing the sessions a user is associcated with
+/// The various attributes of a session
+#[derive(Debug, Default, PartialEq, Eq, Hash, Serialize, JsonSchema)]
+pub struct Session {
+    /// The number of the proposal this session belongs to
+    proposal_number: u32,
+    /// The number of the visit within the proposal this session belongs to
+    visit_number: u32,
+    /// The beamline the session took place on
+    beamline: String,
+}
+
+/// A row from ISPyB detailing the beamline a session took place on
 struct SessionRow {
-    /// The FedID of the user
-    fed_id: String,
+    /// An opaque identifier of the session
+    session_id: u32,
     /// The proposal number of the visit
     proposal_number: u32,
     /// The number of the visit within the proposal
     visit_number: u32,
+    /// The beamline the session took place on
+    beamline: String,
 }
 
 #[allow(clippy::missing_docs_in_private_items)]
 struct RawSessionRow {
-    fed_id: Option<String>,
+    session_id: u32,
     proposal_number: Option<String>,
     visit_number: Option<u32>,
+    beamline: Option<String>,
 }
 
 impl TryFrom<RawSessionRow> for SessionRow {
@@ -74,12 +69,13 @@ impl TryFrom<RawSessionRow> for SessionRow {
 
     fn try_from(value: RawSessionRow) -> Result<Self, Self::Error> {
         Ok(Self {
-            fed_id: value.fed_id.ok_or(anyhow::anyhow!("FedId was NULL"))?,
+            session_id: value.session_id,
             proposal_number: value
                 .proposal_number
                 .ok_or(anyhow::anyhow!("Proposal number was NULL"))?
                 .parse()?,
             visit_number: value.visit_number.unwrap_or_default(),
+            beamline: value.beamline.ok_or(anyhow::anyhow!("Beamline was NULL"))?,
         })
     }
 }
@@ -89,11 +85,14 @@ impl FromIterator<RawSessionRow> for Sessions {
         let mut sessions = Self::default();
         for session_row in iter {
             if let Ok(session_row) = SessionRow::try_from(session_row) {
-                sessions
-                    .0
-                    .entry(session_row.fed_id)
-                    .or_default()
-                    .push((session_row.proposal_number, session_row.visit_number));
+                sessions.insert(
+                    session_row.session_id,
+                    Session {
+                        proposal_number: session_row.proposal_number,
+                        visit_number: session_row.visit_number,
+                        beamline: session_row.beamline,
+                    },
+                );
             }
         }
         sessions
@@ -102,9 +101,9 @@ impl FromIterator<RawSessionRow> for Sessions {
 
 #[cfg(test)]
 mod tests {
-    use super::Sessions;
+    use super::{Session, Sessions};
     use sqlx::MySqlPool;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
 
     #[sqlx::test(migrations = "tests/migrations")]
     async fn fetch_empty(ispyb_pool: MySqlPool) {
@@ -117,95 +116,52 @@ mod tests {
         migrations = "tests/migrations",
         fixtures(
             path = "../../tests/fixtures",
-            scripts("session_membership", "beamline_sessions", "persons", "proposals")
+            scripts("beamline_sessions", "proposals")
         )
     )]
-    async fn fetch_direct(ispyb_pool: MySqlPool) {
-        let sessions = Sessions::fetch(&ispyb_pool).await.unwrap();
-        let mut expected = BTreeMap::new();
-        expected.insert("foo".to_string(), vec![(10030, 10), (10030, 11)]);
-        expected.insert("bar".to_string(), vec![(10031, 10)]);
-        assert_eq!(
-            expected,
-            sessions
-                .0
-                .into_iter()
-                .map(|(k, v)| (k, v.into_iter().collect()))
-                .collect()
-        );
-    }
-
-    #[sqlx::test(
-        migrations = "tests/migrations",
-        fixtures(
-            path = "../../tests/fixtures",
-            scripts("proposal_membership", "beamline_sessions", "persons", "proposals")
-        )
-    )]
-    async fn fetch_indirect(ispyb_pool: MySqlPool) {
+    async fn fetch_some(ispyb_pool: MySqlPool) {
         let sessions = Sessions::fetch(&ispyb_pool).await.unwrap();
         let mut expected = BTreeMap::new();
         expected.insert(
-            "foo".to_string(),
-            BTreeSet::from([
-                (10030, 10),
-                (10030, 11),
-                (10030, 12),
-                (10031, 10),
-                (10031, 11),
-            ]),
+            40,
+            Session {
+                proposal_number: 10030,
+                visit_number: 10,
+                beamline: "i12".to_string(),
+            },
         );
         expected.insert(
-            "bar".to_string(),
-            BTreeSet::from([(10030, 10), (10030, 11), (10030, 12)]),
-        );
-        assert_eq!(
-            expected,
-            sessions
-                .0
-                .into_iter()
-                .map(|(k, v)| (k, v.into_iter().collect()))
-                .collect()
-        );
-    }
-
-    #[sqlx::test(
-        migrations = "tests/migrations",
-        fixtures(
-            path = "../../tests/fixtures",
-            scripts(
-                "session_membership",
-                "proposal_membership",
-                "beamline_sessions",
-                "persons",
-                "proposals"
-            )
-        )
-    )]
-    async fn fetch_both(ispyb_pool: MySqlPool) {
-        let sessions = Sessions::fetch(&ispyb_pool).await.unwrap();
-        let mut expected = BTreeMap::new();
-        expected.insert(
-            "foo".to_string(),
-            BTreeSet::from([
-                (10030, 10),
-                (10030, 11),
-                (10030, 12),
-                (10031, 10),
-                (10031, 11),
-            ]),
+            41,
+            Session {
+                proposal_number: 10030,
+                visit_number: 11,
+                beamline: "i22".to_string(),
+            },
         );
         expected.insert(
-            "bar".to_string(),
-            BTreeSet::from([(10030, 10), (10030, 11), (10030, 12), (10031, 10)]),
+            42,
+            Session {
+                proposal_number: 10030,
+                visit_number: 12,
+                beamline: "b13".to_string(),
+            },
         );
-        assert_eq!(
-            expected,
-            sessions
-                .0
-                .into_iter()
-                .map(|(k, v)| (k, v.into_iter().collect()))
-                .collect()
+        expected.insert(
+            43,
+            Session {
+                proposal_number: 10031,
+                visit_number: 10,
+                beamline: "p99".to_string(),
+            },
         );
+        expected.insert(
+            44,
+            Session {
+                proposal_number: 10031,
+                visit_number: 11,
+                beamline: "i22".to_string(),
+            },
+        );
+        assert_eq!(expected, sessions.0);
     }
 }
